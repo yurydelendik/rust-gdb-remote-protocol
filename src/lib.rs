@@ -112,6 +112,15 @@ enum FeatureSupported<'a> {
     Value(&'a str),
 }
 
+/// Defines target for the set_current_thread command.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SetThreadFor {
+    /// For 'Continue' command.
+    Continue,
+    /// For `ReadRegister` command.
+    ReadRegister,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 enum Query<'a> {
     /// Return the attached state of the indicated process.
@@ -368,7 +377,7 @@ enum Command<'a> {
     CtrlC,
     UnknownVCommand,
     /// Set the current thread for future commands, such as `ReadRegister`.
-    SetCurrentThread(ThreadId),
+    SetCurrentThread(SetThreadFor, ThreadId),
     /// Insert a software breakpoint.
     InsertSoftwareBreakpoint(Breakpoint),
     /// Insert a hardware breakpoint
@@ -775,8 +784,15 @@ fn v_command<'a>(i: &'a [u8]) -> IResult<&'a [u8], Command<'a>> {
 }
 
 // Parse the H packet.
-named!(parse_h_packet<&[u8], ThreadId>,
-       preceded!(tag!("Hg"), parse_thread_id));
+named!(parse_h_packet<&[u8], (SetThreadFor, ThreadId)>,
+    alt_complete!(
+       preceded!(tag!("Hg"), parse_thread_id) => {
+        |id| (SetThreadFor::ReadRegister, id)
+       }
+       | preceded!(tag!("Hc"), parse_thread_id) => {
+        |id| (SetThreadFor::Continue, id)
+       }
+));
 
 // Parse the D packet.
 named!(parse_d_packet<&[u8], Option<u64>>,
@@ -938,7 +954,7 @@ fn command<'a>(i: &'a [u8]) -> IResult<&'a [u8], Command<'a>> {
          | parse_d_packet => { |pid| Command::Detach(pid) }
          | tag!("g") => { |_| Command::ReadGeneralRegisters }
          | write_general_registers => { |bytes| Command::WriteGeneralRegisters(bytes) }
-         | parse_h_packet => { |thread_id| Command::SetCurrentThread(thread_id) }
+         | parse_h_packet => { |(f, thread_id)| Command::SetCurrentThread(f, thread_id) }
          | tag!("k") => { |_| Command::Kill(None) }
          | read_memory => { |(addr, length)| Command::ReadMemory(MemoryRegion::new(addr, length)) }
          | write_memory => { |(addr, length, bytes)| Command::WriteMemory(MemoryRegion::new(addr, length), bytes) }
@@ -1135,7 +1151,7 @@ pub trait Handler {
     }
 
     /// Set the current thread for future operations.
-    fn set_current_thread(&self, _id: ThreadId) -> Result<(), Error> {
+    fn set_current_thread(&self, _for: SetThreadFor, _id: ThreadId) -> Result<(), Error> {
         Err(Error::Unimplemented)
     }
 
@@ -1284,12 +1300,12 @@ pub trait Handler {
     }
 
     /// Continues execution.
-    fn process_continue(&self) -> Result<(), Error> {
+    fn process_continue(&self) -> Result<StopReason, Error> {
         Err(Error::Unimplemented)
     }
 
     /// Step execution.
-    fn process_step(&self) -> Result<(), Error> {
+    fn process_step(&self) -> Result<StopReason, Error> {
         Err(Error::Unimplemented)
     }
 
@@ -1789,7 +1805,9 @@ where
                     handler.write_memory(region.address, &bytes[..]).into()
                 }
             }
-            Command::SetCurrentThread(thread_id) => handler.set_current_thread(thread_id).into(),
+            Command::SetCurrentThread(f, thread_id) => {
+                handler.set_current_thread(f, thread_id).into()
+            }
             Command::Detach(pid) => handler.detach(pid).into(),
             Command::Continue => handler.process_continue().into(),
             Command::Step => handler.process_step().into(),
