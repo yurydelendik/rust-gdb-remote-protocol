@@ -178,8 +178,10 @@ enum Query<'a> {
     /// Symbol
     Symbol(String, String),
     /// Call stack
+    #[cfg(feature = "wasm")]
     WasmCallStack,
     /// Local
+    #[cfg(feature = "wasm")]
     WasmLocal {
         /// Frame index
         frame: u64,
@@ -187,6 +189,7 @@ enum Query<'a> {
         index: u64,
     },
     /// Memory
+    #[cfg(feature = "wasm")]
     WasmMem {
         /// Frame index
         frame: u64,
@@ -467,6 +470,35 @@ named!(q_search_memory<&[u8], (u64, u64, Vec<u8>)>,
            data: hex_byte_sequence >>
            (address, length, data))));
 
+#[cfg(feature = "wasm")]
+fn wasm_query<'a>(i: &'a [u8]) -> IResult<&'a [u8], Query<'a>> {
+    alt!(i,
+        preceded!(tag!("qWasmCallStack:"), separated_nonempty_list_complete!(tag!(";"), parse_thread_id)) => {
+            |_| Query::WasmCallStack
+        }
+        | preceded!(tag!("qWasmLocal:"),
+            tuple!(dec_value, preceded!(tag!(";"), dec_value))) => {
+            |(frame, index)| Query::WasmLocal {
+                frame,
+                index,
+            }
+        }
+        | preceded!(tag!("qWasmMem:"),
+            tuple!(dec_value, preceded!(tag!(";"), hex_value), preceded!(tag!(";"), hex_value))) => {
+            |(frame, addr, len)| Query::WasmMem {
+                frame,
+                addr,
+                len,
+            }
+        }
+    )
+}
+
+#[cfg(not(feature = "wasm"))]
+fn wasm_query<'a>(_i: &'a [u8]) -> IResult<&'a [u8], Query<'a>> {
+    IResult::Error(error_position!(ErrorKind::Alt, _i))
+}
+
 fn query<'a>(i: &'a [u8]) -> IResult<&'a [u8], Query<'a>> {
     alt_complete!(i,
     tag!("qC") => { |_| Query::CurrentThread }
@@ -511,24 +543,6 @@ fn query<'a>(i: &'a [u8]) -> IResult<&'a [u8], Query<'a>> {
     | preceded!(tag!("qRegisterInfo"), hex_value) => {
         |reg| Query::RegisterInfo(reg)
     }
-    | preceded!(tag!("qWasmCallStack:"), separated_nonempty_list_complete!(tag!(";"), parse_thread_id)) => {
-        |_| Query::WasmCallStack
-    }
-    | preceded!(tag!("qWasmLocal:"),
-        tuple!(dec_value, preceded!(tag!(";"), dec_value))) => {
-        |(frame, index)| Query::WasmLocal {
-            frame,
-            index,
-        }
-    }
-    | preceded!(tag!("qWasmMem:"),
-        tuple!(dec_value, preceded!(tag!(";"), hex_value), preceded!(tag!(";"), hex_value))) => {
-        |(frame, addr, len)| Query::WasmMem {
-            frame,
-            addr,
-            len,
-        }
-    }
     | tuple!(
         preceded!(tag!("qSymbol:"), map_res!(take_until!(":"), str::from_utf8)),
         preceded!(tag!(":"), map_res!(eof!(), str::from_utf8))) => {
@@ -545,6 +559,9 @@ fn query<'a>(i: &'a [u8]) -> IResult<&'a [u8], Query<'a>> {
             offset,
             length,
         }
+    }
+    | wasm_query => {
+        |q| q
     }
     )
 }
@@ -1329,16 +1346,19 @@ pub trait Handler {
     }
 
     /// WebAssembly call stack.
+    #[cfg(feature = "wasm")]
     fn wasm_call_stack(&self) -> Result<Vec<u8>, Error> {
         Err(Error::Unimplemented)
     }
 
     /// WebAssembly local.
+    #[cfg(feature = "wasm")]
     fn wasm_local(&self, _frame: u64, _index: u64) -> Result<Vec<u8>, Error> {
         Err(Error::Unimplemented)
     }
 
     /// WebAssembly memory.
+    #[cfg(feature = "wasm")]
     fn wasm_memory(&self, _frame: u64, _addr: u64, _len: u64) -> Result<Vec<u8>, Error> {
         Err(Error::Unimplemented)
     }
@@ -1860,10 +1880,13 @@ where
             Command::Query(Query::Symbol(sym_value, sym_name)) => {
                 handler.process_symbol(&sym_value, &sym_name).into()
             }
+            #[cfg(feature = "wasm")]
             Command::Query(Query::WasmCallStack) => handler.wasm_call_stack().into(),
+            #[cfg(feature = "wasm")]
             Command::Query(Query::WasmLocal { frame, index }) => {
                 handler.wasm_local(frame, index).into()
             }
+            #[cfg(feature = "wasm")]
             Command::Query(Query::WasmMem { frame, addr, len }) => {
                 handler.wasm_memory(frame, addr, len).into()
             }
@@ -2729,6 +2752,15 @@ fn test_cond_or_command_list() {
             &b""[..],
             vec!(bytecode!('z' as u8), bytecode!['y' as u8; 16])
         )
+    );
+}
+
+#[test]
+#[cfg(feature = "wasm")]
+fn test_wasm_local() {
+    assert_eq!(
+        query(&b"qWasmLocal:1;2"[..]),
+        Done(&b""[..], Query::WasmLocal { frame: 1, index: 2 })
     );
 }
 
